@@ -1,0 +1,5 @@
+# 复制为 .dev.vars 后用于本地开发（npx wrangler dev 会自动加载）
+# 线上请使用 npx wrangler secret put 配置，不要提交到仓库
+
+ADMIN_TOKEN=admin
+SECRET_KEY=please-change-me

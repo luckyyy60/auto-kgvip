@@ -1,0 +1,32 @@
+{
+  "name": "kg-qiandao-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "酷狗概念版 VIP 自动签到 · Cloudflare Workers 多账号托管面板（图形化 / 手机验证码 / 扫码登录）",
+  "keywords": [
+    "cloudflare-worker",
+    "kugou",
+    "checkin",
+    "qiandao"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "kv:create": "wrangler kv namespace create KG_KV",
+    "test": "node test/run.mjs && node test/store.mjs && node test/schedule.mjs && node test/checkin.mjs && node test/ui.mjs",
+    "test:live": "node test/live.mjs",
+    "preview": "node test/preview.mjs",
+    "build:share": "node scripts/build-share.mjs",
+    "screenshots": "node test/screenshots.mjs share/screenshots"
+  },
+  "devDependencies": {
+    "big-integer": "^1.6.52",
+    "crypto-js": "^4.2.0",
+    "jsdom": "^30.1.1",
+    "node-forge": "^1.3.1",
+    "wrangler": "^4.0.0"
+  }
+}

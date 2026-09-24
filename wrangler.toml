@@ -1,0 +1,17 @@
+name = "kg-qiandao-worker"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# 每 5 分钟检查一次：账号到达设定的签到时间且当天未执行过时自动签到
+[triggers]
+crons = ["*/5 * * * *"]
+
+# KV 数据库：保存账号 / 设备指纹 / 设置 / 日志
+# 创建命令：npx wrangler kv namespace create KG_KV
+[[kv_namespaces]]
+binding = "KG_KV"
+id = "在此填入你自己的 KV 命名空间 ID"
+
+# 注意：ADMIN_TOKEN 请使用 secret 配置，不要写在这里
+#   npx wrangler secret put ADMIN_TOKEN
+#   npx wrangler secret put SECRET_KEY    # 可选：用于加密 KV 中的 token
