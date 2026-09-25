@@ -347,6 +347,75 @@ console.log('\n8. 同账号并发保护')
   check('未调用任何接口', api.calls.detail, 0)
 }
 
+// ============ 9. KV 写操作次数受控（免费额度：每天 1000 次写） ============
+
+console.log('\n9. KV 写操作次数受控')
+{
+  const env = fakeEnv()
+  await store.saveSettings(env, { adRounds: 8, adIntervalSeconds: 0, catchUp: false })
+  await store.updateAccounts(env, (list) => {
+    list.push(store.newAccountRecord({ userid: '6000', token: 't', source: 'qr' }))
+    return list
+  })
+  const id = (await store.getAccounts(env))[0].id
+
+  // 先让设备指纹落库，这样统计到的写操作只来自签到流程本身
+  await store.getDevice(env)
+
+  // 统计后续所有 KV 写操作
+  const puts = []
+  const rawPut = env.KG_KV.put
+  env.KG_KV.put = async (key, value) => { puts.push(key); return rawPut(key, value) }
+
+  // 一次跑满 8 次广告（10+ 个步骤），旧实现会按步骤写十多次 KV
+  const api = fakeApi({ ad: (n) => (n >= 8 ? { status: 0, error_code: 30002 } : { status: 1 }) })
+  await runCheckinForAccount(env, id, { trigger: 'manual', budgetMs: 60000, api })
+
+  const accountPuts = puts.filter((k) => k === 'kg:accounts').length
+  const logPuts = puts.filter((k) => k === 'kg:logs').length
+  const devicePuts = puts.filter((k) => k === 'kg:device').length
+
+  const account = (await store.getAccounts(env))[0]
+  check('步骤数 10+', account.lastSteps.filter((s) => s.name.startsWith('广告领取')).length >= 8, true)
+  check('账号写入 ≤3 次（running + 进度 + 结果）', accountPuts <= 3, true)
+  check('日志写入 1 次', logPuts, 1)
+  check('设备指纹不再重复写', devicePuts, 0)
+  check('单次执行总写入 ≤4 次', puts.length <= 4, true)
+  check('最终步骤仍完整落库', account.lastSteps.length >= 10, true)
+  check('进度已清空', account.progress, null)
+}
+
+// ============ 10. 周日 token 刷新只跑一次 ============
+
+console.log('\n10. 周日 token 刷新去重')
+{
+  const env = fakeEnv()
+  // 账号全部停用：refreshTokens 内部会跳过，不会真的调用酷狗接口
+  await store.updateAccounts(env, (list) => {
+    list.push(Object.assign(store.newAccountRecord({ userid: '7000', token: 't', source: 'qr' }), { enabled: false }))
+    return list
+  })
+  await store.saveSettings(env, { autoRefreshToken: true, adRounds: 8, adIntervalSeconds: 0, catchUp: false })
+
+  const puts = []
+  const rawPut = env.KG_KV.put
+  env.KG_KV.put = async (key, value) => { puts.push(key); return rawPut(key, value) }
+
+  const sunday = { date: '2026-09-27', time: '03:00', minutes: 180, weekday: 0 }
+  await handleScheduled(env, { now: sunday })
+  check('周日写入刷新日期', (await store.getSettings(env)).lastRefreshDate, '2026-09-27')
+
+  const afterFirst = puts.length
+  await handleScheduled(env, { now: sunday })
+  check('同一周日不重复刷新', (await store.getSettings(env)).lastRefreshDate, '2026-09-27')
+  check('第二次没有新增写操作', puts.length, afterFirst)
+
+  // 下个周日应重新刷新
+  const nextSunday = { date: '2026-10-04', time: '03:00', minutes: 180, weekday: 0 }
+  await handleScheduled(env, { now: nextSunday })
+  check('下个周日重新刷新', (await store.getSettings(env)).lastRefreshDate, '2026-10-04')
+}
+
 console.log(`\n${'='.repeat(48)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)
 if (failed) process.exitCode = 1

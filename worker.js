@@ -1232,6 +1232,12 @@ var DEVICE_KEY = "kg:device";
 var SETTINGS_KEY = "kg:settings";
 var LOGS_KEY = "kg:logs";
 var MAX_LOGS = 100;
+var LEGACY_KEYS = {
+  [ACCOUNTS_KEY]: "kg_accounts",
+  [DEVICE_KEY]: "kg_device",
+  [SETTINGS_KEY]: "kg_settings",
+  [LOGS_KEY]: "kg_logs"
+};
 var RUNNING_STALE_MS = 3 * 60 * 1e3;
 var DEFAULT_SETTINGS = {
   /** 新账号默认签到时间（北京时间 HH:MM） */
@@ -1245,7 +1251,9 @@ var DEFAULT_SETTINGS = {
   /** 是否在错过签到时间后补签 */
   catchUp: false,
   /** 是否调用设备注册接口获取 dfid（默认关闭，与参考项目一致） */
-  enableDeviceRegister: false
+  enableDeviceRegister: false,
+  /** 最近一次自动刷新 token 的日期（YYYY-MM-DD），用于避免定时任务重复刷新 */
+  lastRefreshDate: ""
 };
 function kv(env) {
   return env.KG_KV || env.KG_ACCOUNTS_KV;
@@ -1254,19 +1262,39 @@ __name(kv, "kv");
 function requireKv(env) {
   const store = kv(env);
   if (!store) {
-    throw new Error('\u672A\u7ED1\u5B9A KV \u547D\u540D\u7A7A\u95F4\uFF0C\u8BF7\u5728 wrangler.toml \u4E2D\u914D\u7F6E [[kv_namespaces]] binding = "KG_KV"');
+    throw new Error(
+      '\u672A\u7ED1\u5B9A KV \u547D\u540D\u7A7A\u95F4\uFF0C\u8BF7\u5728 wrangler.toml \u4E2D\u914D\u7F6E [[kv_namespaces]] binding = "KG_KV"'
+    );
   }
   return store;
 }
 __name(requireKv, "requireKv");
 async function readJson(env, key, fallback) {
-  const raw = await requireKv(env).get(key);
-  if (!raw) return fallback;
+  const store = requireKv(env);
+  const raw = await store.get(key);
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return fallback;
+    }
+  }
+  const legacyKey = LEGACY_KEYS[key];
+  if (!legacyKey) return fallback;
+  const legacyRaw = await store.get(legacyKey);
+  if (!legacyRaw) return fallback;
+  let value;
   try {
-    return JSON.parse(raw);
+    value = JSON.parse(legacyRaw);
   } catch {
     return fallback;
   }
+  try {
+    await store.put(key, legacyRaw);
+    if (typeof store.delete === "function") await store.delete(legacyKey);
+  } catch {
+  }
+  return value;
 }
 __name(readJson, "readJson");
 async function writeJson(env, key, value) {
@@ -1282,15 +1310,20 @@ async function saveSettings(env, patch) {
   const current = await getSettings(env);
   const next = Object.assign({}, current, patch);
   next.adRounds = Math.min(20, Math.max(0, Number(next.adRounds) || 0));
-  next.adIntervalSeconds = Math.min(120, Math.max(0, Number(next.adIntervalSeconds) || 0));
+  next.adIntervalSeconds = Math.min(
+    120,
+    Math.max(0, Number(next.adIntervalSeconds) || 0)
+  );
   await writeJson(env, SETTINGS_KEY, next);
   return next;
 }
 __name(saveSettings, "saveSettings");
+var DEVICE_REQUIRED_FIELDS = ["guid", "mid", "dev", "mac", "webgl"];
 async function getDevice(env) {
   const stored = await readJson(env, DEVICE_KEY, null);
   const device = normalizeDeviceIdentity(stored);
-  if (!stored || JSON.stringify(stored) !== JSON.stringify(device)) {
+  const needsWrite = !stored || DEVICE_REQUIRED_FIELDS.some((field) => !stored[field]);
+  if (needsWrite) {
     await writeJson(env, DEVICE_KEY, device);
   }
   return device;
@@ -1313,7 +1346,12 @@ __name(decryptField, "decryptField");
 async function decryptAccount(account, secret) {
   const out = Object.assign({}, account);
   out.token = await decryptField(account.token, secret, TOKEN_LOCK, out);
-  out.vipToken = await decryptField(account.vipToken, secret, VIP_TOKEN_LOCK, out);
+  out.vipToken = await decryptField(
+    account.vipToken,
+    secret,
+    VIP_TOKEN_LOCK,
+    out
+  );
   return out;
 }
 __name(decryptAccount, "decryptAccount");
@@ -1340,12 +1378,20 @@ async function saveAccounts(env, accounts) {
   return accounts;
 }
 __name(saveAccounts, "saveAccounts");
+var accountsWriteChain = Promise.resolve();
 async function updateAccounts(env, mutator) {
-  const accounts = await getAccounts(env);
-  const result = await mutator(accounts);
-  const next = Array.isArray(result) ? result : accounts;
-  await saveAccounts(env, next);
-  return next;
+  const task = accountsWriteChain.then(async () => {
+    const accounts = await getAccounts(env);
+    const result = await mutator(accounts);
+    const next = Array.isArray(result) ? result : accounts;
+    await saveAccounts(env, next);
+    return next;
+  });
+  accountsWriteChain = task.then(
+    () => void 0,
+    () => void 0
+  );
+  return task;
 }
 __name(updateAccounts, "updateAccounts");
 function newAccountId() {
@@ -1354,7 +1400,9 @@ function newAccountId() {
 }
 __name(newAccountId, "newAccountId");
 function upsertAccount(accounts, incoming) {
-  const index = accounts.findIndex((a) => String(a.userid) === String(incoming.userid));
+  const index = accounts.findIndex(
+    (a) => String(a.userid) === String(incoming.userid)
+  );
   if (index >= 0) {
     const merged = Object.assign({}, accounts[index], incoming, {
       id: accounts[index].id,
@@ -1401,7 +1449,18 @@ function publicAccount(account) {
   };
 }
 __name(publicAccount, "publicAccount");
-function newAccountRecord({ userid, token, t1, nickname, vipType, vipToken, dfid, source, signTime, name }) {
+function newAccountRecord({
+  userid,
+  token,
+  t1,
+  nickname,
+  vipType,
+  vipToken,
+  dfid,
+  source,
+  signTime,
+  name
+}) {
   const providedName = String(name || "").trim();
   return {
     id: newAccountId(),
@@ -1459,6 +1518,8 @@ var CRON_BUDGET_MS = 12e4;
 var BATCH_TOTAL_BUDGET_MS = 55e3;
 var LOCK_RETRY_DELAY_MS = 3e3;
 var MAX_RUNS_PER_DAY = 20;
+var PROGRESS_WRITE_INTERVAL_MS = 3e4;
+var MAX_PROGRESS_WRITES = 2;
 function isFreshRunning(lastRunAt) {
   const startedAt = lastRunAt ? Date.parse(lastRunAt) : NaN;
   return Number.isFinite(startedAt) && Date.now() - startedAt < RUNNING_STALE_MS;
@@ -1709,14 +1770,22 @@ async function executeCheckin(env, accountId, account, settings, { trigger, budg
     runsToday,
     progress: { startedAt, trigger, steps: [] }
   });
+  let progressWrites = 0;
+  let lastProgressAt = Date.now();
+  const onProgress = /* @__PURE__ */ __name(async (steps) => {
+    if (progressWrites >= MAX_PROGRESS_WRITES) return;
+    const nowMs = Date.now();
+    if (nowMs - lastProgressAt < PROGRESS_WRITE_INTERVAL_MS) return;
+    progressWrites++;
+    lastProgressAt = nowMs;
+    await patchAccount(env, accountId, { progress: { startedAt, trigger, steps } });
+  }, "onProgress");
   let result;
   try {
     result = await performCheckin(env, account, settings, {
       budgetMs,
       api,
-      onProgress: /* @__PURE__ */ __name(async (steps) => {
-        await patchAccount(env, accountId, { progress: { startedAt, trigger, steps } });
-      }, "onProgress")
+      onProgress
     });
   } catch (error) {
     result = { ok: false, steps: [], nickname: account.name, message: `\u6267\u884C\u5F02\u5E38\uFF1A${error.message || error}` };
@@ -1836,7 +1905,7 @@ async function refreshTokens(env) {
 __name(refreshTokens, "refreshTokens");
 async function handleScheduled(env, options = {}) {
   const settings = await getSettings(env);
-  const now = shanghaiNow();
+  const now = options.now || shanghaiNow();
   const accounts = await getAccounts(env);
   const targets = accounts.filter((account) => {
     if (account.enabled === false) return false;
@@ -1858,8 +1927,9 @@ async function handleScheduled(env, options = {}) {
       api: options.api
     });
   }
-  if (settings.autoRefreshToken && now.weekday === 0) {
+  if (settings.autoRefreshToken && now.weekday === 0 && settings.lastRefreshDate !== now.date) {
     await refreshTokens(env);
+    await saveSettings(env, { lastRefreshDate: now.date });
   }
   return { ok: true, time: `${now.date} ${now.time}`, matched: targets.length, results };
 }

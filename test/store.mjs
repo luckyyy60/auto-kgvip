@@ -30,6 +30,7 @@ function fakeEnv(secret = 'test-secret') {
       delete: async (key) => { map.delete(key) },
     },
     _dump: (key) => map.get(key),
+    _set: (key, value) => { map.set(key, value) },
   }
 }
 
@@ -145,6 +146,85 @@ console.log('\n6. 设备指纹持久化')
   check('guid 为 32 位 md5', /^[0-9a-f]{32}$/.test(device.guid), true)
   const again = await store.getDevice(env)
   check('二次读取保持不变', again.mid, device.mid)
+}
+
+console.log('\n7. 历史下划线键自动迁移')
+{
+  // 模拟「导入了旧版 KV 数据」：只有 kg_accounts / kg_settings / kg_device / kg_logs
+  const env = fakeEnv('secret-A')
+
+  const seed = fakeEnv('secret-A')
+  await store.updateAccounts(seed, (list) => {
+    list.push(store.newAccountRecord({ userid: '777', token: 'OLD_TOKEN', name: '旧账号', source: 'qr' }))
+    return list
+  })
+  env._set('kg_accounts', seed._dump('kg:accounts'))
+  env._set('kg_settings', JSON.stringify({ defaultSignTime: '03:03', catchUp: true }))
+  env._set('kg_device', JSON.stringify({ guid: 'abc', mid: '123', dev: 'DEV', mac: '02:00:00:00:00:00', webgl: '9', dfid: 'dfid-old' }))
+  env._set('kg_logs', JSON.stringify([{ at: '2026-01-01T00:00:00.000Z', name: '旧日志', status: 'success' }]))
+
+  check('正式键此时不存在', env._dump('kg:accounts'), undefined)
+
+  const list = await store.getAccounts(env)
+  check('读到旧键账号', list[0].token, 'OLD_TOKEN')
+  check('迁移写入正式键', typeof env._dump('kg:accounts'), 'string')
+  check('迁移删除旧键', env._dump('kg_accounts'), undefined)
+
+  const settings = await store.getSettings(env)
+  check('旧键设置生效', settings.defaultSignTime, '03:03')
+  check('旧键设置已迁移', JSON.parse(env._dump('kg:settings')).catchUp, true)
+
+  const device = await store.getDevice(env)
+  check('旧键设备指纹生效', device.dfid, 'dfid-old')
+  check('旧键设备已迁移', env._dump('kg_device'), undefined)
+
+  const logs = await store.getLogs(env)
+  check('旧键日志生效', logs[0].name, '旧日志')
+  check('旧键日志已迁移', env._dump('kg_logs'), undefined)
+
+  // 正式键存在时以正式键为准，不再回退历史键
+  env._set('kg_accounts', JSON.stringify([{ userid: '1', token: 'STALE' }]))
+  const preferred = await store.getAccounts(env)
+  check('正式键优先于历史键', preferred[0].token, 'OLD_TOKEN')
+}
+
+console.log('\n8. 历史绑定名 KG_ACCOUNTS_KV 兼容')
+{
+  const env = fakeEnv()
+  env.KG_KV = undefined
+  env.KG_ACCOUNTS_KV = {
+    get: async () => JSON.stringify([store.newAccountRecord({ userid: '555', token: 'T', source: 'qr' })]),
+    put: async () => {},
+    delete: async () => {},
+  }
+  const list = await store.getAccounts(env)
+  check('从 KG_ACCOUNTS_KV 读取账号', list[0].userid, '555')
+}
+
+console.log('\n9. 设备指纹不重复写回（节省 KV 写额度）')
+{
+  const env = fakeEnv()
+  const device = await store.getDevice(env)
+  check('首次生成并持久化', !!(env._dump('kg:device') || env._dump('kg_device')), true)
+
+  // 之后每次读取都不应再产生 KV 写
+  const puts = []
+  const rawPut = env.KG_KV.put
+  env.KG_KV.put = async (key, value) => { puts.push(key); return rawPut(key, value) }
+
+  await store.getDevice(env)
+  check('完整设备指纹不再写回', puts.length, 0)
+
+  // 历史遗留的额外字段 / 字段顺序变化也不该触发写回
+  env._set('kg:device', JSON.stringify(Object.assign({ extra: 'x' }, JSON.parse(env._dump('kg:device')))))
+  await store.getDevice(env)
+  check('有额外字段也不写回', puts.length, 0)
+
+  // 缺必要字段时必须补写一次
+  env._set('kg:device', JSON.stringify({ guid: device.guid }))
+  const repaired = await store.getDevice(env)
+  check('缺字段时补写一次', puts.length, 1)
+  check('补全后的 mid 可用', /^\d+$/.test(repaired.mid), true)
 }
 
 console.log(`\n${'='.repeat(48)}`)

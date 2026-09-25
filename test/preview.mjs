@@ -57,7 +57,7 @@ const ACCOUNTS = [
   {
     id: 'acc_demo_1',
     name: '雾散风起',
-    userid: '2153608028',
+    userid: '800000001',
     enabled: true,
     signTime: '01:15',
     source: 'sms',
@@ -69,15 +69,15 @@ const ACCOUNTS = [
       { name: '登录校验', ok: true, message: '账号：雾散风起' },
       { name: '听歌领取', ok: true, message: '领取成功' },
       { name: '广告领取', ok: true, message: '该账号无广告领取活动（新账号）' },
-      { name: 'VIP 信息', ok: true, message: '到期时间：2026-10-04 16:06:15' },
+      { name: 'VIP 信息', ok: true, message: '到期时间：2025-01-20 16:06:15' },
     ],
-    vipEndTime: '2026-10-04 16:06:15',
+    vipEndTime: '2025-01-20 16:06:15',
     hasToken: true,
   },
   {
     id: 'acc_demo_2',
-    name: 'i',
-    userid: '2381825374',
+    name: '夜航星',
+    userid: '800000002',
     enabled: true,
     signTime: '01:15',
     source: 'qr',
@@ -86,12 +86,12 @@ const ACCOUNTS = [
     lastStatus: 'success',
     lastMessage: '听歌今日已领取 · 广告 0 次（今日已用尽）',
     lastSteps: [
-      { name: '登录校验', ok: true, message: '账号：i' },
+      { name: '登录校验', ok: true, message: '账号：夜航星' },
       { name: '听歌领取', ok: true, message: '今日已领取' },
       { name: '广告领取 #1', ok: true, message: '今日次数已用尽' },
-      { name: 'VIP 信息', ok: true, message: '到期时间：2026-10-04 16:06:15' },
+      { name: 'VIP 信息', ok: true, message: '到期时间：2025-01-20 16:06:15' },
     ],
-    vipEndTime: '2026-10-04 16:06:15',
+    vipEndTime: '2025-01-20 16:06:15',
     hasToken: true,
   },
   {
@@ -127,10 +127,10 @@ const ACCOUNTS = [
 
 const LOGS = [
   {
-    at: '2025-01-01T17:45:50.000Z', name: 'i', trigger: 'cron', status: 'success',
+    at: '2025-01-01T17:45:50.000Z', name: '夜航星', trigger: 'cron', status: 'success',
     message: '听歌今日已领取 · 广告 0 次（今日已用尽）',
     steps: [
-      { name: '登录校验', ok: true, message: '账号：i' },
+      { name: '登录校验', ok: true, message: '账号：夜航星' },
       { name: '听歌领取', ok: true, message: '今日已领取' },
       { name: '广告领取 #1', ok: true, message: '今日次数已用尽' },
     ],

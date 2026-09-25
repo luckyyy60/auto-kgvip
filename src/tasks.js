@@ -4,7 +4,7 @@
 
 import { loginByToken, registerDevice } from './api/auth.js'
 import { fetchUserDetail, fetchVipDetail, reportAdPlay, reportListenSong } from './api/checkin.js'
-import { appendLog, getAccounts, getDevice, getSettings, RUNNING_STALE_MS, updateAccounts } from './store.js'
+import { appendLog, getAccounts, getDevice, getSettings, saveSettings, RUNNING_STALE_MS, updateAccounts } from './store.js'
 
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -28,6 +28,18 @@ const BATCH_TOTAL_BUDGET_MS = 55000
 const LOCK_RETRY_DELAY_MS = 3000
 /** 同一账号每天的自动执行次数上限（含广告续跑），防止异常情况下无休止重试 */
 const MAX_RUNS_PER_DAY = 20
+
+/**
+ * 执行中「进度」写回 KV 的策略。
+ *
+ * KV 免费额度每天只有 1000 次**写**操作，而一次签到会产生十多个步骤；
+ * 若每一步都写回一次（旧实现），几个账号就能吃掉大半额度。
+ * 现在改为：开始执行的 running 状态与最终结果始终即时写入，
+ * 中间进度最多写 MAX_PROGRESS_WRITES 次、且两次之间至少间隔 PROGRESS_WRITE_INTERVAL_MS，
+ * 界面依旧能看到「执行中」与最终分步明细，只是中间步骤刷新频率降低。
+ */
+const PROGRESS_WRITE_INTERVAL_MS = 30000
+const MAX_PROGRESS_WRITES = 2
 
 /** 判断 running 状态是否仍在有效期内（用于避免重复并发执行） */
 function isFreshRunning(lastRunAt) {
@@ -353,14 +365,25 @@ async function executeCheckin(env, accountId, account, settings, { trigger, budg
     progress: { startedAt, trigger, steps: [] },
   })
 
+  // 中间进度写回节流：把「十多个步骤 → 十多次 KV 写」压到最多 MAX_PROGRESS_WRITES 次。
+  // 计时从开始执行算起，所以耗时很短的任务（例如只有登录 + 听歌）不会产生额外写操作。
+  let progressWrites = 0
+  let lastProgressAt = Date.now()
+  const onProgress = async (steps) => {
+    if (progressWrites >= MAX_PROGRESS_WRITES) return
+    const nowMs = Date.now()
+    if (nowMs - lastProgressAt < PROGRESS_WRITE_INTERVAL_MS) return
+    progressWrites++
+    lastProgressAt = nowMs
+    await patchAccount(env, accountId, { progress: { startedAt, trigger, steps } })
+  }
+
   let result
   try {
     result = await performCheckin(env, account, settings, {
       budgetMs,
       api,
-      onProgress: async (steps) => {
-        await patchAccount(env, accountId, { progress: { startedAt, trigger, steps } })
-      },
+      onProgress,
     })
   } catch (error) {
     result = { ok: false, steps: [], nickname: account.name, message: `执行异常：${error.message || error}` }
@@ -509,7 +532,7 @@ export async function refreshTokens(env) {
  */
 export async function handleScheduled(env, options = {}) {
   const settings = await getSettings(env)
-  const now = shanghaiNow()
+  const now = options.now || shanghaiNow()
   const accounts = await getAccounts(env)
 
   const targets = accounts.filter((account) => {
@@ -538,9 +561,12 @@ export async function handleScheduled(env, options = {}) {
     })
   }
 
-  // 周日刷新 token（北京时间）
-  if (settings.autoRefreshToken && now.weekday === 0) {
+  // 周日刷新 token（北京时间）。
+  // 用 settings.lastRefreshDate 去重：定时任务每 5 分钟触发一次，
+  // 旧实现会在整个周日重复刷新 288 次，白白消耗 KV 写额度并频繁调用酷狗接口。
+  if (settings.autoRefreshToken && now.weekday === 0 && settings.lastRefreshDate !== now.date) {
     await refreshTokens(env)
+    await saveSettings(env, { lastRefreshDate: now.date })
   }
 
   return { ok: true, time: `${now.date} ${now.time}`, matched: targets.length, results }
